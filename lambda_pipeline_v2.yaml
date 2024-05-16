@@ -1,0 +1,281 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Office to PDF Lambda Container Image Pipeline and Lambda Function Deployment"
+
+Parameters:
+  S3ArtifactsBucket:
+    Description: Amazon S3 bucket to store AWS CodePipeline input and output artifacts
+    Type: String
+    Default: <YOUR-S3-BUCKET-NAME>
+  PrivateGitHubBranch:
+    Description: Private GitHub Branch for request file.
+    Type: String
+    Default: <YOUR-PRIVATE-GITHUB-BRANCH>
+  PrivateGitHubOwner:
+    Description: Private GitHub Repo Owner.
+    Type: String
+    Default: <YOUR-EXTERNAL-PACKAGE-OWNER>
+  PrivateGitHubRepo:
+    Description: Private GitHub Repository Name.
+    Type: String
+    Default: <YOUR-EXTERNAL-PACKAGE-REPO>
+  PrivateGitHubToken:
+    Description: GitHub PAT AWS Secrets Manager Secret Name.
+    Type: String
+    NoEcho: true
+    Default: <YOUR-GITHUB-PAT-SECRET-NAME>
+  CodeServicesVpc:
+    Description: AWS CodePipeline and AWS CodeBuild VPC.
+    Type: 'AWS::EC2::VPC::Id'
+    Default: <YOUR-VPC-ID>
+  CodeServicesSubnet:
+    Description: VPC private subnet(s) for AWS CodePipeline and AWS CodeBuild.
+    Type: 'List<AWS::EC2::Subnet::Id>'
+    Default: '<YOUR-PRIVATE-SUBNET-ID1>, <YOUR-PRIVATE-SUBNET-ID2>'
+  DockerfileName:
+    Description: Dockerfile Name
+    Type: String
+    Default: "lambda.dockerfile"
+  DockerImageName:
+    Description: Office Converter Lambda ECR image name
+    Type: String
+    Default: "office-converter-image"
+  ECRName:
+    Type: String
+    Description: Elastic Container Registry (ECR) name
+    Default: "office-converter-image-registry"
+  LambdaSourceBucket:
+    Description: S3 bucket to trigger the Lambda function
+    Type: String
+    Default: "office-converter-source-bucket"
+
+Resources:
+  # Lambda Container Build and Deploy Stage
+  ContainerBuildCodeBuild:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Ref ContainerCodeBuildName
+      Description: CodeBuild Project to build and deploy the container to ECR.
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        PrivilegedMode: true
+        # With the image below we must specify a runtime-version in the Buildspec (see below)
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:3.0
+        EnvironmentVariables:
+          - Name: DOCKERFILE_NAME
+            Value: !Ref DockerfileName
+          - Name: DOCKER_IMAGE_NAME
+            Value: !Ref DockerImageName
+          - Name: ECR_NAME
+            Value: !Ref ECRName
+          - Name: AWS_ACCOUNT_ID
+            Value: !Ref "AWS::AccountId"
+          - Name: AWS_REGION
+            Value: !Ref "AWS::Region"
+      ServiceRole: !GetAtt CodeSuiteRole.Arn
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: |
+          version: 0.2
+          phases:
+            build:
+              commands:
+                - docker login -u AWS -p $(aws ecr get-login-password --region ${AWS_REGION}) ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS::Region}.amazonaws.com
+                - docker build -f ${DOCKERFILE_NAME} -t {DOCKER_IMAGE_NAME} .
+                - docker tag ${DOCKER_IMAGE_NAME}:latest ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_NAME}:lambda
+                - docker push ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_NAME}:lambda
+
+  # Lambda Container Build and Deploy Pipeline
+  CodePipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: !Ref CodePipelineName
+      ArtifactStore:
+        Type: S3
+        Location: !Ref S3ArtifactsBucket
+        EncryptionKey:
+          Id: !GetAtt KMSKey.Arn
+          Type: KMS
+      RoleArn: !GetAtt CodeServicesRole.Arn
+      Stages:
+        - Name: 'Pull_Internal_Repository'
+          Actions:
+            - Name: 'Source'
+              ActionTypeId:
+                Category: Source
+                Owner: ThirdParty
+                Version: 1
+                Provider: GitHub
+              OutputArtifacts:
+                - Name: RepoToDownload
+              Configuration:
+                Owner: !Ref PrivateGitHubOwner
+                Repo: !Ref PrivateGitHubRepo
+                Branch: !Ref PrivateGitHubBranch
+                PollForSourceChanges: false
+                OAuthToken: !Sub "{{resolve:secretsmanager:${PrivateGitHubToken}}}"
+              RunOrder: 1
+        - Name: BuildAndDeployImage
+          Actions:
+            - Name: "LambdaContainerImage"
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: "1"
+              Configuration:
+                ProjectName: !Ref ContainerBuildCodeBuild
+              InputArtifacts:
+                - Name: MyApp
+              OutputArtifacts:
+                - Name: MyAppBuilt
+              RunOrder: 2
+        - Name: DeployLambdaFunction
+          Actions:
+            - Name: "DeployServerlessStack"
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CloudFormation
+                Version: "1"
+              Configuration:
+                StackName: "LambdaDeployStack"
+                ActionMode: CREATE_UPDATE
+                RoleArn: !GetAtt CodeServicesRole.Arn
+                Capabilities: CAPABILITY_AUTO_EXPAND
+                TemplatePath: "template.yaml" # SAM template
+                ParameterOverrides: !Sub |
+                  {
+                    "ECRName": "${ECRName}",
+                    "LambdaSourceBucket": "${LambdaSourceBucket}"
+                  }
+              InputArtifacts:
+                - Name: MyAppBuilt
+              RunOrder: 3
+
+  # AWS Key Management Service (KMS) Key to Encrypt CodePipeline Artifacts
+  KMSKey:
+    Type: 'AWS::KMS::Key'
+    Properties:
+      Description: 'git CodePipeline integration, bucket'
+
+  # IAM Role for AWS Code Services (For example, CodePipeline and CodeBuild)
+  CodeServicesRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+        AssumeRolePolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: "Allow"
+              Principal:
+                  Service: 
+                   - 'codebuild.amazonaws.com'
+                   - 'codepipeline.amazonaws.com'
+              Action:
+                  - "sts:AssumeRole"
+        Path: "/"
+        ManagedPolicyArns:
+          - !Ref CodeServicesVpcEndpointPolicy
+
+  # IAM Policy for AWS Code Services
+  CodeServicesIamPolicy:
+    Type: 'AWS::IAM::ManagedPolicy'
+    Properties:
+        Description: Policy with base permissions for CodeBuild
+        Path: /
+        Roles:
+          - !Ref CodeServicesRole
+        PolicyDocument:
+          Version: 2012-10-17
+          Statement:
+          - Effect: "Allow"
+            Action:
+                - "logs:CreateLogGroup"
+                - "logs:PutLogEvents"
+                - "logs:CreateLogStream"
+            Resource:
+                - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/*"
+          - Effect: Allow
+            Action: 
+                - "s3:List*"
+                - "s3:Put*"
+                - "s3:Get*"
+                - "s3:DeleteObject"
+            Resource:
+              - !Sub arn:aws:s3:::${S3ArtifactsBucket}
+              - !Sub arn:aws:s3:::${S3ArtifactsBucket}/*
+          - Effect: Allow
+            Action: 
+                - "codeartifact:*"
+            Resource: '*'
+          - Effect: Allow
+            Action:
+              - 'iam:PassRole'
+            Resource: 
+              - !GetAtt CodeServicesRole.Arn
+          - Effect: Allow
+            Action:
+             - "codebuild:*"
+             - "codeguru-security:*"
+             - "codepipeline:*"
+             - "codeartifact:*"
+            Resource: '*'
+          - Effect: Allow
+            Action:
+             - 'kms:*'
+             - 'kms:Decrypt'
+             - 'kms:ReEncrypt*'
+             - 'kms:GenerateDataKey*'
+             - 'kms:DescribeKey'
+            Resource: "*"
+          - Effect: Allow
+            Action:
+             - "sns:publish"
+            Resource: !Ref SNSTopic
+          - Effect: Allow
+            Action:
+             - 'secretsmanager:GetSecretValue'
+            Resource: !Sub "arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:*"
+
+  # IAM policy for AWS Code Services VPC Endpoints
+  CodeServicesVpcEndpointPolicy:
+    Type: 'AWS::IAM::ManagedPolicy'
+    Properties:
+        Description: Policy with permissions for AWS Code Services to work with VPC Endpoints
+        Path: /
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Action:
+                  - 'ec2:CreateNetworkInterface'
+                  - 'ec2:DescribeDhcpOptions'
+                  - 'ec2:DescribeNetworkInterfaces'
+                  - 'ec2:DeleteNetworkInterface'
+                  - 'ec2:DescribeSubnets'
+                  - 'ec2:DescribeSecurityGroups'
+                  - 'ec2:DescribeVpcs'
+              Resource: '*'
+            - Effect: Allow
+              Action:
+                  - 'ec2:CreateNetworkInterfacePermission'
+              Resource: !Sub 'arn:aws:ec2:${AWS::Region}:${AWS::AccountId}:network-interface/*'
+              Condition:
+                StringEquals: {"ec2:Subnet": [{
+                      "Fn::Join": ["", ["arn:aws:ec2:", {"Ref" : "AWS::Region" },":", {"Ref" : "AWS::AccountId"}, ":subnet/", { "Fn::Select" : [ "0", {"Ref": "CodeServicesSubnet"} ] }
+                        ]
+                      ]
+                    },
+                    {
+                      "Fn::Join": ["", ["arn:aws:ec2:", {"Ref" : "AWS::Region" },":", {"Ref" : "AWS::AccountId"}, ":subnet/", { "Fn::Select" : [ "1", {"Ref": "CodeServicesSubnet"} ] }
+                        ]
+                      ]
+                    }],
+                  "ec2:AuthorizedService": "codebuild.amazonaws.com"}
+
+Outputs:
+  LambdaFunctionArn:
+    Description: ARN of the deployed Lambda function
+    Value: !GetAtt OfficeConverter.Arn

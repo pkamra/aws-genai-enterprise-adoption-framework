@@ -1,0 +1,188 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Lambdas Container Image Pipeline"
+Parameters:
+  # CONTAINER PARAMS
+  DockerBuild:
+    Description: App configuration directory
+    Type: String
+    Default: "transcribe-audio"
+  ContainerCodeBuildName:
+    Description: Lambda container project name
+    Type: String
+    Default: "lambda-container-build"
+  ECRName:
+    Type: String
+    Description: Elastic Container Registry name
+    Default: "transcribe-audio"
+  Namespace:
+    Description: A prefix used to name provisioned resources
+    Type: String
+    Default: "lambda-container-pipeline"
+  LambdaDeployStackName:
+    Description: Lambda deployment CloudFormation Stack name.
+    Type: String
+    Default: "lambda-deploy-stack"
+  # REPO PARAMS
+  Branch:
+    Description: Git branch to clone.
+    Type: String
+    Default: "main"  # Changed default branch to main
+  GitUrl:
+    Description: Git SSH URL.
+    Type: String
+    Default: "git@github.com:autoclip-ai/transcribe_audio.git"
+  SourceActionProvider:
+    Description: GitHub source action provider name.
+    Type: String
+    Default: "GitHub"
+  SourceActionVersion:
+    Description: GitHub source action version.
+    Type: String
+    Default: "1"
+  SecretsManagerArnForSSHPrivateKey:
+    Description: Git Repo SSH Private Key stored in AWS Secrets Manager.
+    Type: String
+    NoEcho: "true"
+    Default: "arn:aws:secretsmanager:us-east-1:343827663581:secret:transcribe-audio-rsa-sZTNyB"
+  RepoCloneLambdaVpc:
+    Description: VPC for Git clone Lambda and CodeBuild deployment.
+    Type: "AWS::EC2::VPC::Id"
+    Default: "vpc-02d5d4d2abf8253eb"
+  RepoCloneLambdaSubnet:
+    Description: Private subnet(s) for Git clone Lambda and CodeBuild deployment.
+    Type: "List<AWS::EC2::Subnet::Id>"
+    Default: "subnet-029340c2e0be2c30f, subnet-0739efe0eafa60e3b"
+  LambdaCodeS3Bucket:
+    Description: S3 Bucket Containing Git Clone Lambda
+    Type: String
+    Default: git-repo-integration
+  LambdaCodeS3Key:
+    Description: S3 Key for Git Clone Lambda
+    Type: String
+    Default: "repo-clone-lambda.zip"
+Resources:
+  RepoCloneCodeBuild:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Ref RepoCloneCodeBuildName
+      VpcConfig:
+        VpcId: !Ref RepoCloneLambdaVpc
+        SecurityGroupIds: [!Ref RepoCloneSecurityGroup]
+        Subnets: !Ref RepoCloneLambdaSubnet
+      Artifacts:
+        Type: NO_ARTIFACTS
+      Environment:
+        Image: aws/codebuild/standard:2.0
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+      QueuedTimeoutInMinutes: 60
+      ServiceRole: !GetAtt CodeSuiteRole.Arn
+      Source:
+        Type: GITHUB
+        Location: !Ref GitUrl
+        GitCloneDepth: 1
+        BuildSpec: |
+          version: 0.2
+          env:
+            exported-variables:
+              - GIT_COMMIT_ID
+              - GIT_COMMIT_MSG
+          phases:
+            install:
+              runtime-versions:
+                python: 3.7
+            build:
+              commands:
+                - echo "=======================Start-Deployment============================="
+                - echo "Setting temporary AWS CLI profile using CodePipeline job poll response"
+                - PROFILE='temp-profile'
+                - aws configure set aws_access_key_id $CodePipelineArtifactAccessKey --profile $PROFILE
+                - aws configure set aws_secret_access_key $CodePipelineArtifactSecretAccessKey --profile $PROFILE
+                - aws configure set aws_session_token $CodePipelineArtifactSessionToken --profile $PROFILE
+                - echo "Getting the SSH Private Key"
+                - aws secretsmanager get-secret-value --secret-id $SSHSecretKeyName --query 'SecretString' --output text >> ~/.ssh/id_rsa
+                - ls ~/
+                - echo "Setting SSH config profile"
+                - |
+                  cat > ~/.ssh/config <<EOF
+                  Host *
+                    AddKeysToAgent yes
+                    StrictHostKeyChecking no
+                    IdentityFile ~/.ssh/id_rsa
+                  EOF
+                - chmod 600 ~/.ssh/id_rsa
+                - echo "Cloning the repository $GitUrl on branch $Branch"
+                - git clone --single-branch --depth=1 --branch $Branch $GitUrl .
+                - ls
+                - echo "Zipping the checked out contents"
+                - zip -r $CodePipelineArtifactBucketObjectKey ./ -x '*.git*'
+                - mv $CodePipelineArtifactBucketObjectKey.zip $CodePipelineArtifactBucketObjectKey
+                - ls -alh
+                - echo "Put the zipped and KMS encrypted Object to Originating Pipelines Artifact Store"
+                - aws s3 cp $CodePipelineArtifactBucketObjectKey s3://$CodePipelineArtifactBucket/$CodePipelineArtifactBucketPath/$CodePipelineArtifactBucketObjectKey --sse aws:kms --sse-kms-key-id $CodePipelineArtifactKMSKeyId --profile $PROFILE
+                - export GIT_COMMIT_ID=$(git rev-parse --short HEAD)
+                - echo $GIT_COMMIT_ID
+                - COMMIT_MSG=$(git log --pretty='format:%Creset%s' --no-merges -1)
+                - export GIT_COMMIT_MSG="${COMMIT_MSG}"
+                - echo $GIT_COMMIT_MSG
+                - echo "=======================End-Deployment============================="
+        Type: CODEPIPELINE
+      TimeoutInMinutes: 14
+
+  ContainerBuildCodeBuild:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Ref ContainerCodeBuildName
+      Description: CodeBuild Project to build and deploy the container to ECR.
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        PrivilegedMode: true
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:3.0
+        EnvironmentVariables:
+          - Name: DOCKER_BUILD
+            Value: !Ref DockerBuild
+          - Name: AWS_ACCOUNT_ID
+            Value: !Ref "AWS::AccountId"
+          - Name: AWS_REGION
+            Value: !Ref "AWS::Region"
+          - Name: ECR_NAME
+            Value: !Ref ECRName
+      ServiceRole: !GetAtt CodeBuildServiceRole.Arn
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: |
+          version: 0.2
+          env:
+            variables:
+              AWS_DEFAULT_REGION: $AWS_REGION
+          phases:
+            pre_build:
+              commands:
+                - echo Logging in to Amazon ECR...
+                - $(aws ecr get-login --no-include-email --region $AWS_REGION)
+            build:
+              commands:
+                - echo Building the Docker image...
+                - cd $DOCKER_BUILD
+                - docker build -t $ECR_NAME .
+                - docker tag $ECR_NAME:latest $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_NAME:latest
+            post_build:
+              commands:
+                - echo Build completed on $(date)
+                - echo Pushing the Docker image to ECR...
+                - docker push $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_NAME:latest
+                - echo Deploying to ECR completed on $(date)
+      TimeoutInMinutes: 60
+
+Outputs:
+  RepoCloneCodeBuildArn:
+    Value: !Ref RepoCloneCodeBuild
+    Export:
+      Name: !Sub "${Namespace}-RepoCloneCodeBuildArn"
+  ContainerBuildCodeBuildArn:
+    Value: !Ref ContainerBuildCodeBuild
+    Export:
+      Name: !Sub "${Namespace}-ContainerBuildCodeBuildArn"

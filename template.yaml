@@ -1,0 +1,65 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: Lambda SAM template
+
+Parameters:
+  ECRName:
+    Type: String
+    Default: "office-converter-image-registry"
+    Description: Elastic Container Registry (ECR) name
+  LambdaSourceBucket:
+    Type: String
+    Default: "office-converter-source-bucket"
+    Description: S3 bucket to trigger the Lambda function
+
+Resources:
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: LambdaExecutionPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:*
+                  - s3:*
+                Resource: "*"
+
+  OfficeConverter:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: OfficeConverter
+      ImageUri: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${ECRName}:lambda"
+      PackageType: Image
+      Role: !GetAtt LambdaExecutionRole.Arn
+      AutoPublishAlias: live
+      Timeout: 900 # seconds > 15mins
+      MemorySize: 10240
+      Environment:
+        Variables:
+          TRANSFORMERS_CACHE: "/tmp/"
+      Events:
+        S3Event:
+          Type: S3
+          Properties:
+            Bucket: !Ref LambdaSourceBucket
+            Events: s3:ObjectCreated:*
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: suffix
+                    Value: .pptx
+
+    Metadata:
+      DockerTag: office-converter-image:lambda
+      Dockerfile: lambda.dockerfile
+      DockerContext: .
