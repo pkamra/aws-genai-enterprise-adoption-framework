@@ -1,0 +1,148 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: AWS Service Catalog Product Template for Generative Application
+
+Parameters:
+  S3DataSource:
+    Type: String
+    Description: Select the S3 data source for the generative application
+    Default: "s3://default-bucket"
+
+  VectorStoreIndex:
+    Type: String
+    Description: Select the vector store index for the generative application
+    Default: "OpenSearch"
+
+  FoundationModel:
+    Type: String
+    Description: Select the foundation model for the generative application
+    Default: "default-model"
+
+  StorageLocation:
+    Type: String
+    Description: Enter the storage location for prompt templates
+    Default: "s3://prompt-templates"
+
+
+  LLMAppExposure:
+    Type: String
+    Description: Specify how the LLM app is exposed
+    Default: "Private"
+    # AllowedValues: 
+
+Resources:
+  Agent:
+    Type: AWS::Bedrock::Agent
+    Properties:
+      AgentName: GenerativeAgent
+      AgentResourceRoleArn: !Sub "arn:aws:iam::${AWS::AccountId}:role/GenerativeAgentRole"
+      AutoPrepare: true
+      CustomerEncryptionKeyArn: "arn:aws:kms:us-east-1:123456789012:key/abcd1234-12ab-34cd-56ef-1234567890ab"
+      Description: Agent for the generative application
+      FoundationModel: !Ref FoundationModel
+      IdleSessionTTLInSeconds: 1800
+      Instruction: "Provide instructions for the generative application here"
+      Tags: 
+        Name: GenerativeAgent
+      TestAliasTags: 
+        Name: GenerativeAgentTest
+
+  KnowledgeBase:
+    Type: AWS::Bedrock::KnowledgeBase
+    Properties:
+      Name: GenerativeKnowledgeBase
+      Description: Knowledge base for the generative application
+      RoleArn: !Sub "arn:aws:iam::${AWS::AccountId}:role/GenerativeKnowledgeBaseRole"
+      KnowledgeBaseConfiguration:
+        Type: !If 
+          - IsOpenSearch
+          - "VECTOR"
+          - !If 
+            - IsAurora
+            - "VECTOR"
+            - "VECTOR"
+        VectorKnowledgeBaseConfiguration:
+          EmbeddingModelArn: !Sub "arn:${AWS::Partition}:bedrock:${AWS::Region}::foundation-model/amazon.titan-embed-text-v1"
+      StorageConfiguration:
+        Type: !If 
+          - IsOpenSearch
+          - "OPENSEARCH_SERVERLESS"
+          - !If 
+            - IsAurora
+            - "RDS"
+            - "PINECONE"
+        OpensearchServerlessConfiguration: 
+          CollectionArn: !If 
+            - IsOpenSearch
+            - "arn:aws:aoss:us-west-2:123456789012:collection/abcdefghij1234567890"
+            - ""
+          VectorIndexName: !If 
+            - IsOpenSearch
+            - "cfn-test-index"
+            - ""
+          FieldMapping: 
+            VectorField: !If 
+              - IsOpenSearch
+              - "cfn-test-vector-field"
+              - ""
+            TextField: "text"
+            MetadataField: "metadata"
+        RdsConfiguration: 
+          ResourceArn: !If 
+            - IsAurora
+            - "arn:aws:rds:us-west-2:123456789012:cluster:generative-cluster"
+            - ""
+          CredentialsSecretArn: !If 
+            - IsAurora
+            - "arn:aws:secretsmanager:us-west-2:123456789012:secret:rds!cluster-4f5961a1-ebd5-4887-818f-0f902e945e04-eFxmC6"
+            - ""
+          DatabaseName: "generative_database"
+          TableName: "knowledge_base_table"
+          FieldMapping: 
+            VectorField: "embedding"
+            TextField: "chunks"
+            MetadataField: "metadata"
+            PrimaryKeyField: "id"
+        PineconeConfiguration: 
+          ConnectionString: !If 
+            - IsPinecone
+            - "https://xxxx.pinecone.io"
+            - ""
+          CredentialsSecretArn: !If 
+            - IsPinecone
+            - "arn:aws:secretsmanager:us-west-2:123456789012:secret:pinecone-secret-abc123"
+            - ""
+          Namespace: "kb-namespace"
+          FieldMapping: 
+            TextField: "text"
+            MetadataField: "metadata"
+
+  DataSource:
+    Type: AWS::Bedrock::DataSource
+    Properties:
+      KnowledgeBaseId: !Ref KnowledgeBase
+      Name: GenerativeDataSource
+      Description: DataSource for the generative application
+      DataSourceConfiguration:
+        Type: "S3"
+        S3Configuration:
+          BucketArn: !Ref S3DataSource
+          InclusionPrefixes: ["aws-overview.pdf"]
+
+# Condition to determine the type of storage
+Conditions:
+  IsOpenSearch: !Equals [!Ref VectorStoreIndex, "OpenSearch"]
+  IsAurora: !Equals [!Ref VectorStoreIndex, "Aurora"]
+  IsPinecone: !Equals [!Ref VectorStoreIndex, "Pinecone"]
+
+Outputs:
+  AgentName:
+    Description: Name of the generative application agent
+    Value: !Ref Agent
+
+  KnowledgeBaseName:
+    Description: Name of the generative application knowledge base
+    Value: !Ref KnowledgeBase
+
+  DataSourceName:
+    Description: Name of the generative application data source
+    Value: !Ref DataSource
