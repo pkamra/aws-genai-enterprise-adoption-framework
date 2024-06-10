@@ -1,0 +1,419 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Supporting resources for Insurance Agent powered by Agents and Knowledge base for Amazon Bedrock"
+Metadata:
+  LICENSE: >-
+    Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+
+    Permission is hereby granted, free of charge, to any person obtaining a copy of this
+    software and associated documentation files (the "Software"), to deal in the Software
+    without restriction, including without limitation the rights to use, copy, modify,
+    merge, publish, distribute, sublicense, and/or sell copies of the Software, and to
+    permit persons to whom the Software is furnished to do so.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+    INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+    PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+    HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+    OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+    SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Generative Application Configuration
+        Parameters:
+          - S3DataSource
+          - AgentName
+          - AgentInstructions
+          - FoundationModel
+          - KnowledgeBaseName
+          - EmbeddingModel
+          - VectorStoreType
+          - ChunkingStrategy
+          - ChunkingMaxTokens
+          - ChunkingOverlapPercentage
+          - PromptTemplateLocation
+          - LLMAppExposure
+          - BedrockCustomResourceKey
+      - Label:
+          default: Emulated Customer Resource Configuration
+        Parameters:
+          - DataLoaderKey
+          - CreateClaimKey
+          - GatherEvidenceKey
+          - SendReminderKey
+          - BedrockAgentsLayerArn
+          - CfnresponseLayerArn
+          - SNSEmail
+          - EvidenceUploadUrl
+
+    ParameterLabels:
+
+      # Generative AI Application Configuration
+      S3DataSource:
+        default: Amazon S3 Data Source Bucket
+      AgentName:
+        default: Agent Name
+      AgentInstructions:
+        default: Agent Instructions
+      FoundationModel:
+        default: Foundation Model
+      KnowledgeBaseName:
+        default: Knowledge Base Name
+      EmbeddingModel:
+        default: Embedding Model
+      VectorStoreType:
+        default: Vector Store Type
+      ChunkingStrategy:
+        default: Chunking Strategy
+      ChunkingMaxTokens:
+        default: Chunking Max Tokens
+      ChunkingOverlapPercentage:
+        default: Chunking Overlap Percentage
+      PromptTemplateLocation:
+        default: your-s3-bucket
+      LLMAppExposure:
+        default: LLM Application Hosting Model
+      BedrockCustomResourceKey:
+        default: Amazon Bedrock Custom Resource Lambda Package
+      
+      # Emulated Customer Resource Configuration
+      DataLoaderKey:
+        default: Claims Data Loader Lambda Object Key
+      CreateClaimKey:
+        default: Create Claim Action Group Lambda Package
+      GatherEvidenceKey:
+        default: Gather Evidence Action Group Lambda Package
+      SendReminderKey:
+        default: Send Reminder Action Group Lambda Package
+      BedrockAgentsLayerArn:
+        default: Agents for Amazon Bedrock Lambda Layer ARN
+      CfnresponseLayerArn:
+        default: Amazon CloudFormation Response Lambda Layer ARN
+      SNSEmail:
+        default: SNS Email
+      EvidenceUploadUrl:
+        default: Evidence Upload URL
+
+Parameters:
+
+  # Generative AI Application Configuration
+  S3DataSource:
+    Description: Select the Amazon S3 bucket containing your knowledge base assets
+    Type: String
+    Default: bedrock-v1-customer-resources
+  AgentName:
+    Type: String
+    Description: Enter your agent name
+    Default: test-agent
+  AgentInstructions:
+    Type: String
+    Description: Provide agent instructions
+    Default: "Enter your desired agent functionality"
+  FoundationModel:
+    Type: String
+    Description: Select the foundation model for your generative AI application
+    Default: anthropic.claude-3-sonnet-20240229-v1:0
+    AllowedValues: ["anthropic.claude-3-sonnet-20240229-v1:0", "anthropic.claude-3-haiku-20240307-v1:0", "anthropic.claude-v2:1"]
+  KnowledgeBaseName:
+    Type: String
+    Description: Enter your knowledge base name
+    Default: test-kb
+  EmbeddingModel:
+    Type: String
+    Description: Select the embedding model for your knowledge base
+    Default: cohere.embed-english-v3
+  VectorStoreType:
+    Type: String
+    Default: OPENSEARCH_SERVERLESS
+    AllowedValues: ["OPENSEARCH_SERVERLESS", "PINECONE", "RDS"]
+    Description: Select the vector store type for your knowledge base"
+  ChunkingStrategy:
+    Type: String
+    Description: Select the chunking strategy for data ingestion [FIXED_SIZE, NONE]
+    Default: FIXED_SIZE
+    AllowedValues:
+      - "FIXED_SIZE"
+      - "NONE"
+  ChunkingMaxTokens:
+    Type: Number
+    Description: "The maximum number of tokens to include in a chunk"
+    Default: 800
+  ChunkingOverlapPercentage:
+    Type: Number
+    Description: "The percentage of overlap between adjacent chunks of a data source"
+    Default: 20
+  PromptTemplateLocation:
+    Type: String
+    Description: Enter the storage location for prompt templates
+    Default: not-used   # Emulated Customer Resources
+  LLMAppExposure:
+    Type: String
+    Description: Specify how the LLM app is exposed
+    Default: Private
+    AllowedValues: 
+      - "Private"
+      - "Public"
+  BedrockCustomResourceKey:
+    Type: String
+    Description: S3 Key for Bedrock custom resource function code
+    Default: agent/lambda/knowledge-base/create_bedrock_agent_kb_ds.zip
+
+  # Emulated Customer Resources
+  DataLoaderKey:
+    Description: S3 Key for Data Loader
+    Type: String
+    Default: agent/lambda/data-loader/loader_deployment_package.zip
+  CreateClaimKey:
+    Description: S3 Key for create claim function code
+    Type: String
+    Default: agent/lambda/action-groups/create_claim.zip
+  GatherEvidenceKey:
+    Description: S3 Key for gather evidence function code
+    Type: String
+    Default: agent/lambda/action-groups/gather_evidence.zip
+  SendReminderKey:
+    Description: S3 Key for send reminder function code
+    Type: String
+    Default: agent/lambda/action-groups/send_reminder.zip
+  BedrockAgentsLayerArn:
+    Description: Agents for Bedrock Lambda Layer
+    Type: String
+    Default: "arn:aws:lambda:us-east-1:239380694500:layer:bedrock-agents:105"
+  CfnresponseLayerArn:
+    Description: Agents for Bedrock Lambda Layer
+    Type: String
+    Default: "arn:aws:lambda:us-east-1:239380694500:layer:cfnresponse:70"
+  SNSEmail:
+    Description: SNS Email.
+    Type: String
+    Default: "kbuilder@amazon.com"
+  EvidenceUploadUrl:
+    Description: Customer Evidence Upload Website URL
+    Type: String
+    Default: your-evidence-upload-url
+
+Conditions:
+  IsOpenSearchServerless: !Equals [!Ref VectorStoreType, "OPENSEARCH_SERVERLESS"]
+  IsPinecone: !Equals [!Ref VectorStoreType, "PINECONE"]
+  IsRDS: !Equals [!Ref VectorStoreType, "RDS"]
+
+Resources:
+
+  # IAM Role for Bedrock custom resource Lambda function
+  BedrockCustomResourceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${AWS::StackName}-BedrockCustomResourceRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service: 
+                - "lambda.amazonaws.com"
+                - "bedrock.amazonaws.com"
+            Action: "sts:AssumeRole"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: !Sub ${AWS::StackName}-BedrockCustomResourceRolePolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - iam:PassRole
+                  - aoss:*
+                  - dynamodb:*
+                  - lambda:Get*
+                  - lambda:InvokeFunction
+                  - bedrock:*
+                  - sns:Publish
+                  - s3:GetObject
+                  - s3:PutObject
+                Resource: "*"
+
+  ExistingClaimsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub ${AWS::StackName}-ExistingClaims
+      AttributeDefinitions:
+        - AttributeName: claimId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: claimId
+          KeyType: HASH
+      ProvisionedThroughput:
+        ReadCapacityUnits: '3'
+        WriteCapacityUnits: '3'
+      SSESpecification:
+        SSEEnabled: True
+
+  DataLoaderFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: Lambda function to initially load the claims catalog.
+      FunctionName: !Sub ${AWS::StackName}-DDBDataLoader
+      Code: 
+        S3Bucket: !Ref S3DataSource
+        S3Key: !Ref DataLoaderKey
+      Runtime: python3.11
+      MemorySize: 256
+      Timeout: 20
+      Handler: index.lambda_handler
+      Layers:
+        - !Ref CfnresponseLayerArn
+      Role: !GetAtt BedrockCustomResourceRole.Arn
+      Environment:
+        Variables:
+          EXISTING_CLAIMS_TABLE_NAME: !Ref ExistingClaimsTable
+
+  LoadPlanData:
+    Type: Custom::LoadDynamoDB
+    Properties:
+      ServiceToken: !GetAtt DataLoaderFunction.Arn
+
+  CreateClaimFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: Bedrock Insurance agent create claim function
+      FunctionName: !Sub ${AWS::StackName}-CreateClaimFunction
+      Code:
+        S3Bucket: !Ref S3DataSource
+        S3Key: !Ref CreateClaimKey
+      Runtime: python3.11
+      MemorySize: 512
+      Timeout: 30
+      Handler: create_claim.lambda_handler
+      Layers:
+        - !Ref BedrockAgentsLayerArn
+      Role: !GetAtt BedrockCustomResourceRole.Arn
+      Architectures:
+        - arm64
+      Environment:
+        Variables:
+          CUSTOMER_WEBSITE_URL: !Ref EvidenceUploadUrl
+          EXISTING_CLAIMS_TABLE_NAME: !Ref ExistingClaimsTable
+          SNS_TOPIC_ARN: !Ref SNSTopic
+
+  GatherEvidenceFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: Bedrock Insurance agent gather evidence function.
+      FunctionName: !Sub ${AWS::StackName}-GatherEvidenceFunction
+      Code:
+        S3Bucket: !Ref S3DataSource
+        S3Key: !Ref GatherEvidenceKey
+      Runtime: python3.11
+      MemorySize: 512
+      Timeout: 30
+      Handler: gather_evidence.lambda_handler
+      Layers:
+        - !Ref BedrockAgentsLayerArn
+      Role: !GetAtt BedrockCustomResourceRole.Arn
+      Architectures:
+        - arm64
+      Environment:
+        Variables:
+          CUSTOMER_WEBSITE_URL: !Ref EvidenceUploadUrl
+          SNS_TOPIC_ARN: !Ref SNSTopic
+
+  SendReminderFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: Bedrock Insurance agent send reminder function
+      FunctionName: !Sub ${AWS::StackName}-SendReminderFunction
+      Code:
+        S3Bucket: !Ref S3DataSource
+        S3Key: !Ref SendReminderKey
+      Runtime: python3.11
+      MemorySize: 512
+      Timeout: 30
+      Handler: send_reminder.lambda_handler
+      Layers:
+        - !Ref BedrockAgentsLayerArn
+      Role: !GetAtt BedrockCustomResourceRole.Arn
+      Architectures:
+        - arm64
+      Environment:
+        Variables:
+          EXISTING_CLAIMS_TABLE_NAME: !Ref ExistingClaimsTable
+          SNS_TOPIC_ARN: !Ref SNSTopic
+
+  # Permissions for action group functions
+  BedrockCreateClaimFunctionPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: 'lambda:InvokeFunction'
+      FunctionName: !Ref CreateClaimFunction
+      Principal: 'bedrock.amazonaws.com'
+
+  BedrockGatherEvidenceFunctionPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: 'lambda:InvokeFunction'
+      FunctionName: !Ref GatherEvidenceFunction
+      Principal: 'bedrock.amazonaws.com'
+
+  BedrockSendReminderFunctionPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: 'lambda:InvokeFunction'
+      FunctionName: !Ref SendReminderFunction
+      Principal: 'bedrock.amazonaws.com'
+
+  # KMS key for SSE
+  KMSKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: "Generative AI application key"
+
+  # Lambda function to handle Bedrock custom resource creation
+  CreateBedrockCustomResources:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-CreateBedrockCustomResources
+      Handler: create_bedrock_agent_kb_ds.lambda_handler
+      Role: !GetAtt BedrockCustomResourceRole.Arn
+      Code:
+        S3Bucket: !Ref S3DataSource
+        S3Key: !Ref BedrockCustomResourceKey
+      Layers:
+        - "arn:aws:lambda:us-east-1:239380694500:layer:aws4auth-layer:2"
+      Runtime: python3.11
+      MemorySize: 256
+      Timeout: 900
+      Environment:
+        Variables:
+          AGENT_NAME: !Ref AgentName
+          KB_NAME: !Ref KnowledgeBaseName
+          S3_DATA_SOURCE: !Ref S3DataSource
+          VECTOR_STORE_TYPE: !Ref VectorStoreType
+
+  # Custom resource to trigger the Lambda function
+  CustomResourcesTrigger:
+    Type: Custom::CreateResources
+    Properties:
+      ServiceToken: !GetAtt CreateBedrockCustomResources.Arn
+      EmbeddingModel: !Ref EmbeddingModel
+      FoundationModel: !Ref FoundationModel
+      AgentInstructions: !Ref AgentInstructions
+      CreateClaimFunctionArn: !GetAtt CreateClaimFunction.Arn
+      GatherEvidenceFunctionArn: !GetAtt GatherEvidenceFunction.Arn
+      SendReminderFunctionArn: !GetAtt SendReminderFunction.Arn
+      BedrockRoleArn: !GetAtt BedrockCustomResourceRole.Arn
+      AccountRoleArn: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+      KMSKeyArn: !GetAtt KMSKey.Arn
+      ChunkingStrategy: !Ref ChunkingStrategy
+      ChunkingMaxTokens: !Ref ChunkingMaxTokens
+      ChunkingOverlapPercentage: !Ref ChunkingOverlapPercentage
+
+  SNSTopic:
+    Type: AWS::SNS::Topic
+
+  SNSSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Endpoint: !Ref SNSEmail
+      Protocol: email
+      TopicArn: !Ref SNSTopic
