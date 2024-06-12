@@ -34,6 +34,9 @@ Metadata:
           - PromptTemplateLocation
           - LLMAppExposure
           - BedrockCustomResourceKey
+          - BedrockAgentsLayerArn
+          - CfnresponseLayerArn
+          - Aws4AuthLayerArn
       - Label:
           default: Emulated Customer Resource Configuration
         Parameters:
@@ -41,8 +44,6 @@ Metadata:
           - CreateClaimKey
           - GatherEvidenceKey
           - SendReminderKey
-          - BedrockAgentsLayerArn
-          - CfnresponseLayerArn
           - SNSEmail
           - EvidenceUploadUrl
 
@@ -73,10 +74,14 @@ Metadata:
         default: your-s3-bucket
       LLMAppExposure:
         default: LLM Application Hosting Model
-      BedrockCustomResourceKey:
-        default: Amazon Bedrock Custom Resource Lambda Package
+      BedrockAgentsLayerArn:
+        default: Agents for Amazon Bedrock Lambda Layer ARN
+      CfnresponseLayerArn:
+        default: Amazon CloudFormation Response Lambda Layer ARN
+      Aws4AuthLayerArn:
+        default: AWS Requests Authorizer Lambda Layer ARN
       
-      # Emulated Customer Resource Configuration
+      # Emulated Customer Resources Configuration
       DataLoaderKey:
         default: Claims Data Loader Lambda Object Key
       CreateClaimKey:
@@ -85,10 +90,6 @@ Metadata:
         default: Gather Evidence Action Group Lambda Package
       SendReminderKey:
         default: Send Reminder Action Group Lambda Package
-      BedrockAgentsLayerArn:
-        default: Agents for Amazon Bedrock Lambda Layer ARN
-      CfnresponseLayerArn:
-        default: Amazon CloudFormation Response Lambda Layer ARN
       SNSEmail:
         default: SNS Email
       EvidenceUploadUrl:
@@ -108,7 +109,12 @@ Parameters:
   AgentInstructions:
     Type: String
     Description: Provide agent instructions
-    Default: "Enter your desired agent functionality"
+    Default: |
+      You are an insurance agent that has access to domain-specific insurance knowledge. 
+      You can create new insurance claims, send pending document reminders to policy holders with open claims, and gather claim evidence. 
+      You can also retrieve claim amount and repair estimate information for a specific claim ID or answer general insurance questions about things like coverage, premium, policy, rate, deductible, accident, documents, resolution, and condition. 
+      You can answer internal questions about things like which steps an agent should follow and the company's internal processes. 
+      You can respond to questions about multiple claim IDs within a single conversation
   FoundationModel:
     Type: String
     Description: Select the foundation model for your generative AI application
@@ -137,7 +143,7 @@ Parameters:
   ChunkingMaxTokens:
     Type: Number
     Description: "The maximum number of tokens to include in a chunk"
-    Default: 800
+    Default: 512
   ChunkingOverlapPercentage:
     Type: Number
     Description: "The percentage of overlap between adjacent chunks of a data source"
@@ -157,6 +163,18 @@ Parameters:
     Type: String
     Description: S3 Key for Bedrock custom resource function code
     Default: agent/lambda/knowledge-base/create_bedrock_agent_kb_ds.zip
+  BedrockAgentsLayerArn:
+    Description: Agents for Bedrock Lambda Layer
+    Type: String
+    Default: "arn:aws:lambda:us-east-1:239380694500:layer:bedrock-agents:105"
+  CfnresponseLayerArn:
+    Description: Agents for Bedrock Lambda Layer
+    Type: String
+    Default: "arn:aws:lambda:us-east-1:239380694500:layer:cfnresponse:70"
+  Aws4AuthLayerArn:
+    Description: AWS Requests Authorizer Lambda Layer ARN
+    Type: String
+    Default: "arn:aws:lambda:us-east-1:239380694500:layer:aws4auth-layer:2"
 
   # Emulated Customer Resources
   DataLoaderKey:
@@ -175,14 +193,6 @@ Parameters:
     Description: S3 Key for send reminder function code
     Type: String
     Default: agent/lambda/action-groups/send_reminder.zip
-  BedrockAgentsLayerArn:
-    Description: Agents for Bedrock Lambda Layer
-    Type: String
-    Default: "arn:aws:lambda:us-east-1:239380694500:layer:bedrock-agents:105"
-  CfnresponseLayerArn:
-    Description: Agents for Bedrock Lambda Layer
-    Type: String
-    Default: "arn:aws:lambda:us-east-1:239380694500:layer:cfnresponse:70"
   SNSEmail:
     Description: SNS Email.
     Type: String
@@ -379,7 +389,8 @@ Resources:
         S3Bucket: !Ref S3DataSource
         S3Key: !Ref BedrockCustomResourceKey
       Layers:
-        - "arn:aws:lambda:us-east-1:239380694500:layer:aws4auth-layer:2"
+        - !Ref Aws4AuthLayerArn
+        - !Ref CfnresponseLayerArn
       Runtime: python3.11
       MemorySize: 256
       Timeout: 900

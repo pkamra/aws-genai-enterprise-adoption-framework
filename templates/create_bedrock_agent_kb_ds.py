@@ -5,6 +5,7 @@ import uuid
 import boto3
 import logging
 import botocore
+import cfnresponse
 from requests_aws4auth import AWS4Auth
 from opensearchpy import OpenSearch, RequestsHttpConnection
 
@@ -27,7 +28,7 @@ logger.setLevel(logging.INFO)
 
  # Generates a random 4-character suffix for unique resource naming
 def generate_unique_resource_prefix():
-    return uuid.uuid4().hex[:3] 
+    return uuid.uuid4().hex[:4] 
 
 # Creates an OpenSearch Serverless collection encryption policy.
 def create_encryption_policy(kb_unique_name):
@@ -155,7 +156,7 @@ def create_opensearch_collection(kb_unique_name):
             raise error
 
 # Creates an OpenSearch Serverless vector index
-def index_data(host, awsauth, embedding_model, vector_index_name, gitl, metadata_field, text_field, vector_field_name,):
+def index_data(host, awsauth, embedding_model, vector_index_name, metadata_field, text_field, vector_field_name,):
     
     # Determine dimension based on 'embedding_model'
     model_dimensions = {
@@ -183,11 +184,11 @@ def index_data(host, awsauth, embedding_model, vector_index_name, gitl, metadata
       "mappings": {
         "properties": {
           f"{metadata_field}": {
-            "type": "text",
+            "type": "keyword",
             "index": False
           },
           "id": {
-            "type": "text",
+            "type": "keyword",
             "fields": {
             "keyword": {
               "type": "keyword",
@@ -197,7 +198,7 @@ def index_data(host, awsauth, embedding_model, vector_index_name, gitl, metadata
           },
           f"{text_field}": {
             "type": "text",
-            "index": False
+            "index": True
           },
           f"{vector_field_name}": {
             "type": "knn_vector",
@@ -232,6 +233,21 @@ def index_data(host, awsauth, embedding_model, vector_index_name, gitl, metadata
         logger.error(f'Error creating index: {e}')
         raise
 
+# Syncs Bedrock knowledge base using an ingestion job
+def update_knowledge_base(selected_ds_id, selected_kb_id):
+
+    description = "Programmatic update of Bedrock Knowledge Base Data Source"
+    try:
+        response = agent_client.start_ingestion_job(
+            dataSourceId=selected_ds_id,
+            description=description,
+            knowledgeBaseId=selected_kb_id
+        )
+    except Exception as e:
+        st.error(f"Error starting ingestion job: {e}")
+    finally:
+        file_obj.close()
+
 # Waits for OpenSearch Serverless collection 'active' state
 def wait_for_collection_creation(kb_unique_name, awsauth, embedding_model, vector_index_name, vector_field_name, text_field, metadata_field):
 
@@ -246,12 +262,12 @@ def wait_for_collection_creation(kb_unique_name, awsauth, embedding_model, vecto
     
     host = response['collectionDetails'][0]['collectionEndpoint']
     final_host = host.replace("https://", "")
-    
+
+    # update_knowledge_base(file_content, bucket_name, s3_file_name, selected_ds_id, selected_kb_id):
     index_data(final_host, awsauth, embedding_model, vector_index_name, metadata_field, text_field, vector_field_name)
 
 # Creates Bedrock knowledge base with different storage configurations based on the 'VECTOR_STORE_TYPE' environment variable
 def create_knowledge_base(kb_unique_name, account_id, bedrock_lambda_role_arn, embedding_model, vector_index_name, vector_field_name, text_field, metadata_field, collection_arn=None,):
-    print(f"vector_store_type: {vector_store_type}")
 
     if vector_store_type == 'OPENSEARCH_SERVERLESS':
         storage_configuration = {
@@ -343,11 +359,11 @@ def create_knowledge_base(kb_unique_name, account_id, bedrock_lambda_role_arn, e
     return knowledge_base_response['knowledgeBase']['knowledgeBaseId']
 
 # Creates Bedrock knowledge base data source
-def create_data_source(kb_unique_name, knowledge_base_id, kms_key_arn, chunking_strategy, chunking_max_tokens, chunking_overlap, bucket_owner_account_id=None, inclusion_prefixes=None):
+def create_data_source(kb_unique_name, knowledge_base_id, kms_key_arn, embedding_model, chunking_strategy, chunking_max_tokens, chunking_overlap, bucket_owner_account_id=None, inclusion_prefixes=None):
     
     data_source_configuration = {
         's3Configuration': {
-            'bucketArn': f"arn:aws:s3:::{bucket_name}"
+            'bucketArn': f"arn:aws:s3:::{s3_bucket_name}"
         },
         'type': 'S3'
     }
@@ -366,7 +382,23 @@ def create_data_source(kb_unique_name, knowledge_base_id, kms_key_arn, chunking_
     if chunking_strategy == 'FIXED_SIZE':
         if chunking_max_tokens is None or chunking_overlap is None:
             raise ValueError("max_tokens and overlap_percentage must be provided for FIXED_SIZE chunking strategy.")
-        
+
+        # Determine dimension based on 'embedding_model'
+        model_tokens = {
+            'amazon.titan-embed-text-v1': 8192,
+            'cohere.embed-english-v3': 512,
+            'cohere.embed-multilingual-v3': 512,
+            # Add other models with their dimensions here as needed
+        }
+
+        if embedding_model not in model_tokens:
+            raise ValueError(f"Unsupported embedding model: {embedding_model}. Supported models are: {list(model_dimensions.keys())}")
+
+        tokens = model_tokens[embedding_model]
+
+        if chunking_max_tokens > tokens:
+            chunking_max_tokens = tokens
+
         vector_ingestion_configuration['chunkingConfiguration']['fixedSizeChunkingConfiguration'] = {
             'maxTokens': chunking_max_tokens,
             'overlapPercentage': chunking_overlap
@@ -389,7 +421,7 @@ def create_data_source(kb_unique_name, knowledge_base_id, kms_key_arn, chunking_
     return data_source_response['dataSource']['dataSourceId']
 
 # Creates Bedrock agent action groups by iterating through list of dictionaries
-def create_action_groups(agent_unique_name, properties):
+def create_action_groups(agent_id, agent_version, properties):
 
     try:
         # Define action groups
@@ -397,50 +429,123 @@ def create_action_groups(agent_unique_name, properties):
             {
                 "Name": "create-claim",
                 "Description": "Use this action group to create an insurance claim",
-                "FunctionArn": properties['CreateClaimFunctionArn']
+                "FunctionArn": properties['CreateClaimFunctionArn'],
+                "FunctionSchema": {
+                    'functions': [
+                        {
+                            'name': 'createClaim',
+                            'description': 'Function to create an insurance claim',
+                            'parameters': {
+                                'claimType': {
+                                    'description': 'Type of the claim',
+                                    'required': True,
+                                    'type': 'string'
+                                },
+                                'policyNumber': {
+                                    'description': 'Policy number associated with the claim',
+                                    'required': True,
+                                    'type': 'string'
+                                }
+                            }
+                        }
+                    ]
+                }
             },
             {
                 "Name": "gather-evidence",
                 "Description": "Use this action group to send the user a URL for evidence upload on open status claims with pending documents. Return the documentUploadUrl to the user",
-                "FunctionArn": properties['GatherEvidenceFunctionArn']
+                "FunctionArn": properties['GatherEvidenceFunctionArn'],
+                "FunctionSchema": {
+                    'functions': [
+                        {
+                            'name': 'gatherEvidence',
+                            'description': 'Function to gather evidence for a claim',
+                            'parameters': {
+                                'claimId': {
+                                    'description': 'ID of the claim',
+                                    'required': True,
+                                    'type': 'string'
+                                }
+                            }
+                        }
+                    ]
+                }
             },
             {
                 "Name": "send-reminder",
                 "Description": "Use this action group to check claim status, identify missing or pending documents, and send reminders to policy holders",
-                "FunctionArn": properties['SendReminderFunctionArn']
+                "FunctionArn": properties['SendReminderFunctionArn'],
+                "FunctionSchema": {
+                    'functions': [
+                        {
+                            'name': 'sendReminder',
+                            'description': 'Function to send reminders for pending claims',
+                            'parameters': {
+                                'claimId': {
+                                    'description': 'ID of the claim',
+                                    'required': True,
+                                    'type': 'string'
+                                },
+                                'reminderType': {
+                                    'description': 'Type of reminder to send',
+                                    'required': False,
+                                    'type': 'string'
+                                }
+                            }
+                        }
+                    ]
+                }
+            },
+            {
+                "Name": "user-input",
+                "Description": "",
+                "FunctionArn": None,
+                "ParentActionGroupSignature": 'AMAZON.UserInput'
             }
         ]
 
         # Create action groups
         for action_group in action_groups:
-            response = bedrock_agent_client.create_action_group(
-                agentName=f"{agent_unique_name}-agent",
-                actionGroupName=action_group['Name'],
-                description=action_group['Description'],
-                functionArn=action_group['FunctionArn']
-            )
+            if action_group["Name"] == "user-input":
+                response = bedrock_agent_client.create_agent_action_group(
+                    agentId=agent_id,
+                    agentVersion=agent_version,
+                    actionGroupName=action_group['Name'],
+                    parentActionGroupSignature=action_group['ParentActionGroupSignature']
+                )
+            else:
+                response = bedrock_agent_client.create_agent_action_group(
+                    agentId=agent_id,
+                    agentVersion=agent_version,
+                    actionGroupName=action_group['Name'],
+                    description=action_group['Description'],
+                    actionGroupExecutor={
+                        'lambda': action_group['FunctionArn']
+                    },
+                    functionSchema=action_group['FunctionSchema']
+                )
             logger.info(f"Action group created: {response}")
-    
+
     except Exception as e:
         logger.error(f"Failed to create action groups: {e}")
         raise
 
+
 # Creates Bedrock agent
 def create_agent(agent_unique_name, bedrock_lambda_role_arn, foundation_model, agent_instructions, customer_encryption_key_arn=None):
-
     try:
         agent_response = bedrock_agent_client.create_agent(
             agentName=f"{agent_unique_name}-agent",
             agentResourceRoleArn=bedrock_lambda_role_arn,
             description=f"Agent: {agent_name}",
             foundationModel=foundation_model,
-            instruction=instruction,
+            instruction=agent_instructions,
             customerEncryptionKeyArn=customer_encryption_key_arn,
             idleSessionTTLInSeconds=300,
         )
-        logger.info(f'Agent created: {agent_response}')
-        return agent_response['agentId']
-    
+        logger.info(f'Agent created HERE: {agent_response}')
+        return agent_response['agent']['agentId']
+
     except Exception as e:
         logger.error(f'Failed to create agent: {e}')
         if 'failureReasons' in e.response:
@@ -450,17 +555,22 @@ def create_agent(agent_unique_name, bedrock_lambda_role_arn, foundation_model, a
         raise
 
 # Associates knowledge base with agent
-def associate_knowledge_base(agent_id, knowledge_base_id):
+def associate_knowledge_base(agent_id, knowledge_base_id, agent_version='DRAFT'):
 
-    associate_response = bedrock_agent_client.associate_knowledge_base(
-        knowledgeBaseIdentifier={
-            'knowledgeBaseId': knowledge_base_id
-        },
-        resource={
-            'agentId': agent_id
-        }
-    )
-    logger.info(f'Knowledge base associated: {associate_response}')
+    try:
+        associate_response = bedrock_agent_client.associate_agent_knowledge_base(
+            agentId=agent_id,
+            agentVersion=agent_version,
+            description=f"Knowledge base for agent ID: {agent_id}",
+            knowledgeBaseId=knowledge_base_id,
+            knowledgeBaseState='ENABLED'
+        )
+        logger.info(f'Knowledge base associated: {associate_response}')
+    
+    except Exception as e:
+        logger.error(f'Failed to associate knowledge base: {e}')
+        raise
+
 
 # Main handler
 def lambda_handler(event, context):
@@ -480,13 +590,15 @@ def lambda_handler(event, context):
     kms_key_arn = properties['KMSKeyArn']
 
     chunking_strategy = properties['ChunkingStrategy']
-    chunking_max_tokens = properties['ChunkingMaxTokens']
-    chunking_overlap = properties['ChunkingOverlapPercentage']
+    chunking_max_tokens = int(properties['ChunkingMaxTokens'])
+    chunking_overlap = int(properties['ChunkingOverlapPercentage'])
 
     vector_field_name = f"{agent_name}-embeddings"
     vector_index_name = f"{agent_name}-vector"
     text_field = "AMAZON_BEDROCK_TEXT_CHUNK"
     metadata_field = "AMAZON_BEDROCK_METADATA"
+
+    agent_version = "DRAFT"
 
     unique_resource_prefix = generate_unique_resource_prefix()
     agent_unique_name = f"{agent_name}-{unique_resource_prefix}"
@@ -520,41 +632,25 @@ def lambda_handler(event, context):
             knowledge_base_id = create_knowledge_base(kb_unique_name, account_id, bedrock_lambda_role_arn, embedding_model, vector_index_name, vector_field_name, text_field, metadata_field, collection_arn)
 
             # Create Bedrock data source
-            create_data_source(kb_unique_name, knowledge_base_id, kms_key_arn, chunking_strategy, chunking_max_tokens, chunking_overlap)
+            create_data_source(kb_unique_name, knowledge_base_id, kms_key_arn, embedding_model, chunking_strategy, chunking_max_tokens, chunking_overlap)
 
             # Create Bedrock agent with action groups
             agent_id = create_agent(agent_unique_name, bedrock_lambda_role_arn, foundation_model, agent_instructions, kms_key_arn)
-            create_action_groups(agent_unique_name, properties)
+            time.sleep(30)
+            create_action_groups(agent_id, agent_version, properties)
 
             # Associate knowledge base with agent
-            associate_knowledge_base(agent_id, knowledge_base_id)
+            associate_knowledge_base(agent_id, knowledge_base_id, agent_version)
 
-            return {
-                'Status': 'SUCCESS',
-                'PhysicalResourceId': f"agent-{agent_id}",
-                'StackId': event['StackId'],
-                'RequestId': event['RequestId'],
-                'LogicalResourceId': event['LogicalResourceId'],
-                'Data': {}
-            }
+            cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData={})
         except Exception as e:
-            print(f"Error: {e}")
-            return {
-                'Status': 'FAILED',
-                'PhysicalResourceId': f"agent-{agent_id}",
-                'StackId': event['StackId'],
-                'RequestId': event['RequestId'],
-                'LogicalResourceId': event['LogicalResourceId'],
-                'Reason': str(e),
-                'Data': {}
-            }
+            logger.error("Failed to load data into DynamoDB table: %s", str(e))
+            cfnresponse.send(event, context, cfnresponse.FAILED, responseData={"Error": str(e)})
 
-    elif request_type == 'Update' or request_type == 'Delete':
-        return {
-            'Status': 'SUCCESS',
-            'PhysicalResourceId': f"agent-{agent_id}",
-            'StackId': event['StackId'],
-            'RequestId': event['RequestId'],
-            'LogicalResourceId': event['LogicalResourceId'],
-            'Data': {}
-        }
+    elif request_type == 'Delete':
+        cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData={})
+
+    return {
+        'statusCode': 200,
+        'body': json.dumps('Function execution completed successfully')
+    }
